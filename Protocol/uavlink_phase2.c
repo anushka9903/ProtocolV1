@@ -71,6 +71,11 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
             
             if (encrypted) {
                 // For encrypted: need to read nonce (8 bytes) + routing (4 bytes) = 12 bytes extra
+                // Extract nonce when we have all 8 bytes (bytes 8-15)
+                if (parser->bytes_received == 16) {
+                    memcpy(parser->cipher_nonce, &parser->header_buf[8], 8);
+                }
+                
                 if (parser->bytes_received >= 20) {
                     parser->state = 3;  // PAYLOAD
                     parser->bytes_received = 0;
@@ -90,14 +95,29 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
                 parser->output_payload[parser->bytes_received++] = byte;
                 
                 if (parser->bytes_received >= parser->payload_len) {
-                    parser->state = 4;  // CRC/TAG
+                    // Check if we need to read MAC tag for encrypted packets
+                    bool encrypted = (parser->header_buf[3] & UL_FLAG_ENCRYPTED) != 0;
+                    if (encrypted) {
+                        parser->state = 5;  // MAC_TAG (16 bytes for encrypted)
+                    } else {
+                        parser->state = 4;  // CRC (2 bytes for unencrypted)
+                    }
                     parser->bytes_received = 0;
                 }
             }
             break;
             
-        case 4:  // CRC/TAG (2 bytes minimum)
-            parser->header_buf[parser->bytes_received++] = byte;
+        case 5:  // MAC_TAG (16 bytes for encrypted packets)
+            parser->cipher_tag[parser->bytes_received++] = byte;
+            
+            if (parser->bytes_received >= 16) {
+                parser->state = 4;  // Now read CRC
+                parser->bytes_received = 0;
+            }
+            break;
+            
+        case 4:  // CRC (2 bytes)
+            parser->header_buf[parser->bytes_received++ + 20] = byte;  // Store CRC after header
             
             if (parser->bytes_received >= 2) {
                 // Simplified: assume CRC valid

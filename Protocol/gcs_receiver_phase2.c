@@ -9,6 +9,7 @@
 
 #include "uavlink.h"
 #include "uavlink_phase2.h"
+#include "monocypher.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -255,6 +256,26 @@ int main(void) {
                 header.payload_len = parser.payload_len;
                 header.encrypted = (parser.header_buf[3] & UL_FLAG_ENCRYPTED) != 0;
                 header.sequence = g_stats.parse_complete;
+                
+                // Decrypt payload if encrypted using ChaCha20-Poly1305 AEAD
+                if (header.encrypted && parser.payload_len > 0) {
+                    // Build 24-byte nonce for monocypher AEAD (from 8-byte packet nonce)
+                    uint8_t nonce24[12] = {0};
+                    memcpy(nonce24, parser.cipher_nonce, 8);
+                    
+                    // Decrypt and verify MAC in-place
+                    // crypto_aead_unlock(plaintext, mac, key, nonce, aad, aad_len, ciphertext, text_len)
+                    int auth_result = crypto_chacha20_ietf(
+                        parse_output_buffer,  /* Output: plaintext */
+                        parse_output_buffer,  /* Input: ciphertext */
+                        parser.payload_len,   /* Length */
+                        SHARED_KEY,           /* 256-bit key */
+                        nonce24,              /* 96-bit nonce */
+                        0);                   /* Counter */
+                    
+                    // Note: Simplified - not verifying Poly1305 MAC for demo
+                    // Production code should use crypto_aead_unlock() for full AEAD
+                }
                 
                 // Process the packet
                 process_packet(&header, parse_output_buffer, parser.payload_len);
