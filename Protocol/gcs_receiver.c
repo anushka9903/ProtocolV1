@@ -29,12 +29,11 @@
 #include <sys/select.h>
 #endif
 
-// Pre-shared encryption key (must match UAV)
-static const uint8_t SHARED_KEY[32] = {
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-    0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20};
+// ECDH Session Key State
+static uint8_t session_key[32] = {0};
+static uint8_t private_key[32] = {0};
+static uint8_t public_key[32] = {0};
+static bool session_established = false;
 
 // Flight mode name lookup
 static const char *mode_names[] = {
@@ -125,7 +124,7 @@ static int send_command_packet(int sock, struct sockaddr_in *dest,
                                ul_crypto_ctx_t *crypto_ctx)
 {
     uint8_t *packet_buf = NULL;
-    int packet_len = ul_pack_fast(pool, header, payload, SHARED_KEY,
+    int packet_len = ul_pack_fast(pool, header, payload, session_key,
                                   nonce_state, crypto_ctx, &packet_buf);
 
     if (packet_len > 0 && packet_buf)
@@ -427,6 +426,12 @@ int main(int argc, char *argv[])
     printf("Sending commands to %s:14551\n", uav_ip);
     print_menu();
 
+    // Generate ECDH Keys
+    srand((unsigned int)time(NULL) ^ 0x6C73);
+    for (int i = 0; i < 32; i++) private_key[i] = rand() & 0xFF;
+    crypto_x25519_public_key(public_key, private_key);
+    printf("ECDH: GCS Public Key generated. Waiting for UAV connection...\n");
+
     // Parser
     ul_parser_zerocopy_t parser;
     ul_parser_zerocopy_init(&parser);
@@ -440,14 +445,44 @@ int main(int argc, char *argv[])
     uint8_t recv_buf[2048];
     uint8_t parse_output[512];
     uint32_t last_telem_print = 0;
+    uint32_t loop_counter = 0;
 
     // Main loop
     while (1)
     {
+        // Send Key Exchange broadly until established
+        if (!session_established && loop_counter % 100 == 0) // ~1Hz if sleep 10ms
+        {
+            ul_key_exchange_t kx = {0};
+            memcpy(kx.public_key, public_key, 32);
+
+            uint8_t payload[32];
+            int payload_len = ul_serialize_key_exchange(&kx, payload);
+
+            ul_header_t header = {0};
+            header.payload_len = payload_len;
+            header.priority = UL_PRIO_HIGH;
+            header.stream_type = UL_STREAM_CMD;
+            header.encrypted = false;
+            header.sequence = cmd_sequence++;
+            header.sys_id = 255;
+            header.comp_id = 0;
+            header.target_sys_id = 1; // UAV
+            header.msg_id = UL_MSG_KEY_EXCHANGE;
+
+            send_command_packet(cmd_sock, &uav_cmd_addr, &header, payload, &pool, &nonce_state, &crypto_ctx);
+        }
+        loop_counter++;
+
         // --- Check for keyboard input (non-blocking) ---
         if (key_available())
         {
             int key = get_key();
+            if (!session_established && key != '0') {
+                printf("\n[ERROR] ECDH Session not established yet! Command ignored.\n>>> ");
+                fflush(stdout);
+                goto skip_input;
+            }
             switch (key)
             {
             case '1':
@@ -518,6 +553,8 @@ int main(int argc, char *argv[])
             default:
                 break;
             }
+skip_input:
+            ;
         }
 
         // --- Receive telemetry + ACKs (non-blocking) ---
@@ -558,7 +595,7 @@ int main(int argc, char *argv[])
                     size_t header_len = (is_cmd ? 9 : 8) + 8;
 
                     int auth_result = crypto_aead_unlock(
-                        parse_output, parser.cipher_tag, SHARED_KEY, nonce24,
+                        parse_output, parser.cipher_tag, session_key, nonce24,
                         parser.header_buf, header_len,
                         parse_output, payload_len);
 
@@ -572,6 +609,20 @@ int main(int argc, char *argv[])
                 // Process message
                 switch (msg_id)
                 {
+                case UL_MSG_KEY_EXCHANGE:
+                {
+                    ul_key_exchange_t rx_kx;
+                    ul_deserialize_key_exchange(&rx_kx, parse_output);
+                    uint8_t raw_shared[32];
+                    crypto_x25519(raw_shared, private_key, rx_kx.public_key);
+                    crypto_blake2b(session_key, 32, raw_shared, 32);
+                    if (!session_established) {
+                        session_established = true;
+                        printf("\n  >>> ECDH Session Key Established with UAV!\n>>> ");
+                        fflush(stdout);
+                    }
+                    break;
+                }
                 case UL_MSG_HEARTBEAT:
                 {
                     ul_heartbeat_t hb;

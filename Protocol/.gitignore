@@ -1,6 +1,7 @@
 # Build artifacts
 *.o
 *.exe
+*.dat
 
 # Binary outputs (Linux/macOS)
 uavlink_benchmark

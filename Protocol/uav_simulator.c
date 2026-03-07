@@ -25,12 +25,13 @@
 #include <fcntl.h>
 #endif
 
-// Pre-shared encryption key (32 bytes for ChaCha20)
-static const uint8_t SHARED_KEY[32] = {
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-    0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20};
+#include "monocypher.h"
+
+// ECDH Session Key State
+static uint8_t session_key[32] = {0};
+static uint8_t private_key[32] = {0};
+static uint8_t public_key[32] = {0};
+static bool session_established = false;
 
 // Flight mode name lookup
 static const char *mode_names[] = {
@@ -221,7 +222,7 @@ static void send_ack(int sock, struct sockaddr_in *dest,
     header.msg_id = UL_MSG_CMD_ACK;
 
     uint8_t *packet_buf = NULL;
-    int packet_len = ul_pack_fast(pool, &header, payload, SHARED_KEY,
+    int packet_len = ul_pack_fast(pool, &header, payload, session_key,
                                   nonce_state, crypto_ctx, &packet_buf);
 
     if (packet_len > 0 && packet_buf)
@@ -318,6 +319,12 @@ int main(int argc, char *argv[])
     printf("Commands  <- 0.0.0.0:14551\n");
     printf("Status: DISARMED | Mode: MANUAL\n");
     printf("Waiting for commands...\n\n");
+
+    // Generate ECDH Keys
+    srand((unsigned int)time(NULL) ^ 0x0A0B);
+    for (int i = 0; i < 32; i++) private_key[i] = rand() & 0xFF;
+    crypto_x25519_public_key(public_key, private_key);
+    printf("ECDH: UAV Public Key generated. Waiting for GCS connection...\n");
 
     // Initialize UAV state
     uav_state_t state = {0};
@@ -416,7 +423,7 @@ int main(int argc, char *argv[])
                             const uint8_t *cipher_text, size_t text_size);
 
                         int auth_result = crypto_aead_unlock(
-                            parse_buf, cmd_parser.cipher_tag, SHARED_KEY, nonce24,
+                            parse_buf, cmd_parser.cipher_tag, session_key, nonce24,
                             cmd_parser.header_buf, header_len,
                             parse_buf, cmd_parser.payload_len);
 
@@ -432,20 +439,20 @@ int main(int argc, char *argv[])
 
                     switch (hdr.msg_id)
                     {
-                    case UL_MSG_CMD:
+                    case UL_MSG_KEY_EXCHANGE:
                     {
-                        ul_command_t cmd;
-                        ul_deserialize_command(&cmd, parse_buf);
-                        printf("Command=0x%04X Param1=%u Param2=%u Param3=%u\n",
-                               cmd.command_id, cmd.param1, cmd.param2, cmd.param3);
-
-                        ul_command_ack_t ack = process_command(&state, &cmd);
-                        send_ack(telem_sock, &gcs_telem_addr, &ack, &state,
-                                 &pool, &nonce_state, &crypto_ctx);
+                        ul_key_exchange_t rx_kx;
+                        ul_deserialize_key_exchange(&rx_kx, parse_buf);
+                        uint8_t raw_shared[32];
+                        crypto_x25519(raw_shared, private_key, rx_kx.public_key);
+                        crypto_blake2b(session_key, 32, raw_shared, 32);
+                        session_established = true;
+                        printf("  >>> ECDH Session Key Established with GCS!\n");
                         break;
                     }
-                    case UL_MSG_MODE_CHANGE:
+                    case UL_MSG_CMD:
                     {
+                        if (!session_established) break;
                         ul_mode_change_t mode;
                         ul_deserialize_mode_change(&mode, parse_buf);
                         printf("Mode change -> %s (0x%02X)\n",
@@ -579,6 +586,39 @@ int main(int argc, char *argv[])
 
         // --- Send telemetry ---
 
+        // Send Key Exchange broadly until established
+        if (!session_established && loop % 10 == 0)
+        {
+            ul_key_exchange_t kx = {0};
+            memcpy(kx.public_key, public_key, 32);
+
+            uint8_t payload[32];
+            int payload_len = ul_serialize_key_exchange(&kx, payload);
+
+            ul_header_t header = {0};
+            header.payload_len = payload_len;
+            header.priority = UL_PRIO_HIGH;
+            header.stream_type = UL_STREAM_CMD;
+            header.encrypted = false;
+            header.sequence = state.sequence++;
+            header.sys_id = 1;
+            header.comp_id = 1;
+            header.target_sys_id = 255; // GCS
+            header.msg_id = UL_MSG_KEY_EXCHANGE;
+
+            uint8_t *packet_buf = NULL;
+            int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
+                                          &nonce_state, &crypto_ctx, &packet_buf);
+            if (packet_len > 0 && packet_buf)
+            {
+                sendto(telem_sock, (char *)packet_buf, packet_len, 0,
+                       (struct sockaddr *)&gcs_telem_addr, sizeof(gcs_telem_addr));
+                ul_mempool_free(&pool, packet_buf);
+            }
+        }
+
+        if (!session_established) goto end_loop;
+
         // Heartbeat (1 Hz)
         if (loop % 10 == 0)
         {
@@ -602,7 +642,7 @@ int main(int argc, char *argv[])
             header.msg_id = UL_MSG_HEARTBEAT;
 
             uint8_t *packet_buf = NULL;
-            int packet_len = ul_pack_fast(&pool, &header, payload, SHARED_KEY,
+            int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
                                           &nonce_state, &crypto_ctx, &packet_buf);
 
             if (packet_len > 0 && packet_buf)
@@ -635,7 +675,7 @@ int main(int argc, char *argv[])
             header.msg_id = UL_MSG_ATTITUDE;
 
             uint8_t *packet_buf = NULL;
-            int packet_len = ul_pack_fast(&pool, &header, payload, SHARED_KEY,
+            int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
                                           &nonce_state, &crypto_ctx, &packet_buf);
 
             if (packet_len > 0 && packet_buf)
@@ -671,7 +711,7 @@ int main(int argc, char *argv[])
             header.msg_id = UL_MSG_GPS_RAW;
 
             uint8_t *packet_buf = NULL;
-            int packet_len = ul_pack_fast(&pool, &header, payload, SHARED_KEY,
+            int packet_len = ul_pack_fast(&pool, &header, payload, session_key,
                                           &nonce_state, &crypto_ctx, &packet_buf);
 
             if (packet_len > 0 && packet_buf)
@@ -695,6 +735,9 @@ int main(int argc, char *argv[])
             // Periodically save the nonce to NVM to keep the jump safe
             save_nonce_state(&nonce_state, "uav_nonce.dat");
         }
+
+    end_loop:
+        ; // End loop label
 
 // 100ms loop (10 Hz)
 #ifdef _WIN32

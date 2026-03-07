@@ -93,6 +93,7 @@ typedef struct
 #define UL_MSG_CMD_ACK       0x007
 #define UL_MSG_MODE_CHANGE   0x008
 #define UL_MSG_MISSION_ITEM  0x009
+#define UL_MSG_KEY_EXCHANGE  0x00A
 #define UL_MSG_BATCH         0x3FF /* Special message ID for message batching */
 
 /* Command IDs (used in ul_command_t.command_id) */
@@ -247,6 +248,12 @@ typedef struct
 
 /* --- Command & Control Messages --- */
 
+/* Session Key Exchange (ECDH Public Key) */
+typedef struct
+{
+    uint8_t public_key[32]; // 256-bit X25519 public key
+} ul_key_exchange_t;
+
 /* Generic command (GCS -> UAV) */
 typedef struct
 {
@@ -351,6 +358,9 @@ int ul_deserialize_battery(ul_battery_t *bat, const uint8_t *payload_buf);
 
 int ul_serialize_rc_input(const ul_rc_input_t *rc, uint8_t *payload_buf);
 int ul_deserialize_rc_input(ul_rc_input_t *rc, const uint8_t *payload_buf);
+
+int ul_serialize_key_exchange(const ul_key_exchange_t *kx, uint8_t *payload_buf);
+int ul_deserialize_key_exchange(ul_key_exchange_t *kx, const uint8_t *payload_buf);
 
 int ul_serialize_command(const ul_command_t *cmd, uint8_t *payload_buf);
 int ul_deserialize_command(ul_command_t *cmd, const uint8_t *payload_buf);

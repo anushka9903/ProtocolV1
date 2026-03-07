@@ -497,6 +497,26 @@ int ul_serialize_command(const ul_command_t *cmd, uint8_t *out)
     return 8;
 }
 
+/* --- Session Key Exchange Serialization --- */
+
+int ul_serialize_key_exchange(const ul_key_exchange_t *kx, uint8_t *out)
+{
+    if (!kx || !out)
+        return UL_ERR_NULL_POINTER;
+
+    memcpy(out, kx->public_key, 32);
+    return 32;
+}
+
+int ul_deserialize_key_exchange(ul_key_exchange_t *kx, const uint8_t *in)
+{
+    if (!kx || !in)
+        return UL_ERR_NULL_POINTER;
+
+    memcpy(kx->public_key, in, 32);
+    return 32;
+}
+
 int ul_deserialize_command(ul_command_t *cmd, const uint8_t *in)
 {
     if (!cmd || !in)
@@ -1154,6 +1174,7 @@ ul_encrypt_policy_t ul_get_encrypt_policy(uint16_t msg_id)
     case UL_MSG_CMD_ACK:      return UL_ENCRYPT_ALWAYS;
     case UL_MSG_MODE_CHANGE:  return UL_ENCRYPT_ALWAYS;
     case UL_MSG_MISSION_ITEM: return UL_ENCRYPT_ALWAYS;
+    case UL_MSG_KEY_EXCHANGE: return UL_ENCRYPT_NEVER;
     case UL_MSG_BATCH:        return UL_ENCRYPT_OPTIONAL;
     default:                  return UL_ENCRYPT_OPTIONAL;
     }
@@ -1243,9 +1264,22 @@ int uavlink_pack_cached(uint8_t *buf, const ul_header_t *h, const uint8_t *paylo
          * In a custom SIMD implementation, this cache would store the expanded 16x32-bit state */
     }
 
-    /* Pack normally (monocypher doesn't expose key expansion, so benefit is limited)
-     * The real benefit comes with hardware-accelerated crypto or custom implementations */
-    return uavlink_pack_with_nonce(buf, h, payload, key_32b, nonce_state);
+    /* Apply selective encryption policy to the cached pack */
+    ul_encrypt_policy_t policy = ul_get_encrypt_policy(h->msg_id);
+    const uint8_t *effective_key = NULL;
+
+    switch (policy)
+    {
+    case UL_ENCRYPT_NEVER:
+        effective_key = NULL;
+        break;
+    case UL_ENCRYPT_OPTIONAL:
+    case UL_ENCRYPT_ALWAYS:
+        effective_key = key_32b;
+        break;
+    }
+
+    return uavlink_pack_with_nonce(buf, h, payload, effective_key, nonce_state);
 }
 
 /* --- OPTIMIZATION 3: Message Batching (18% bandwidth reduction) --- */

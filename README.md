@@ -20,6 +20,7 @@ UAVLink is a high-performance binary communication protocol purpose-built for UA
 - ✅ **Fragmentation Support** - Handle payloads up to 4095 bytes with built-in fragmentation
 - ✅ **Link Quality Metrics** - Track valid vs dropped packets for real-time link integrity
 - ✅ **Automatic Failsafe RTL** - Simulation includes configurable timeouts handling live disconnects
+- ✅ **ECDH Session Key Exchange** - Dynamic X25519 negotiation replaces hardcoded keys
 
 ### 🚀 Performance Summary
 
@@ -78,6 +79,7 @@ UAVLink is a high-performance binary communication protocol purpose-built for UA
 ✅ **Delta Encoding** - 57% bandwidth savings for GPS/attitude telemetry  
 ✅ **LZ4 Compression** - Fast compression for repetitive data  
 ✅ **Reed-Solomon FEC** - Recover from packet loss without retransmission  
+✅ **ECDH Session Key** - Dynamic X25519 negotiation for perfect forward secrecy  
 ✅ **ARM NEON Acceleration** - 4x crypto speedup on ARM Cortex-A/Apple Silicon  
 ✅ **x86 AVX2 Support** - 4x crypto speedup on modern Intel/AMD processors
 
