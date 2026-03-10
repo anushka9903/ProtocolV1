@@ -1,12 +1,67 @@
-# Documentation and Testing
-Documentation/
-testing/
-
-# Generated files
-*.dat
+# Build artifacts
+*.o
+*.a
+*.so
+*.dll
+*.dylib
 *.exe
-*.log
+
+# Compiled binaries
+uav_simulator
+gcs_receiver
+uavlink_benchmark
+key_example
+test_*
+
+# Key files (NEVER commit keys!)
+*.key
+*_key.bin
+*_key.hex
+uavlink_key.*
+test_key.*
+benchmark_key.*
+
+# Test output
+*.dat
 *.err
 *.in
 *.out
-*.bin
+
+# LaTeX build files
+*.aux
+*.log
+*.toc
+*.out
+*.pdf
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# Documentation (keeping source, ignoring builds)
+Documentation/*.pdf
+Documentation/*.aux
+Documentation/*.log
+Documentation/*.toc
+Documentation/*.out

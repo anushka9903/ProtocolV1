@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -Wall -O2
 
 # Source files
-CORE_SRC = uavlink.c uavlink_fast.c uavlink_compress.c uavlink_hw_crypto.c monocypher.c
+CORE_SRC = uavlink.c uavlink_fast.c uavlink_compress.c uavlink_hw_crypto.c monocypher.c uavlink_keymanager.c
 
 # Platform-specific flags
 ifeq ($(OS),Windows_NT)
@@ -13,7 +13,7 @@ else
     EXT =
 endif
 
-all: benchmark receiver simulator
+all: benchmark receiver simulator key_example
 
 benchmark: uavlink_benchmark.c $(CORE_SRC)
 	$(CC) $(CFLAGS) -o uavlink_benchmark$(EXT) uavlink_benchmark.c $(CORE_SRC) $(LDFLAGS)
@@ -24,7 +24,10 @@ receiver: gcs_receiver.c $(CORE_SRC)
 simulator: uav_simulator.c $(CORE_SRC)
 	$(CC) $(CFLAGS) -o uav_simulator$(EXT) uav_simulator.c $(CORE_SRC) $(LDFLAGS)
 
-clean:
-	rm -f *.o *.exe uavlink_benchmark gcs_receiver uav_simulator
+key_example: key_example.c $(CORE_SRC)
+	$(CC) $(CFLAGS) -o key_example$(EXT) key_example.c $(CORE_SRC) $(LDFLAGS)
 
-.PHONY: all benchmark receiver simulator clean
+clean:
+	rm -f *.o *.exe uavlink_benchmark gcs_receiver uav_simulator key_example
+
+.PHONY: all benchmark receiver simulator key_example clean
