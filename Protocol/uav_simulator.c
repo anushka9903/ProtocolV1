@@ -9,6 +9,7 @@
 #include "uavlink.h"
 #include "uavlink_fast.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <math.h>
@@ -405,8 +406,13 @@ int main(int argc, char *argv[])
         // --- Check for incoming commands (non-blocking) ---
         struct sockaddr_in sender_addr;
         int sender_len = sizeof(sender_addr);
+#ifdef _WIN32
         int recv_len = recvfrom(cmd_sock, (char *)cmd_recv_buf, sizeof(cmd_recv_buf), 0,
                                 (struct sockaddr *)&sender_addr, &sender_len);
+#else
+        int recv_len = recvfrom(cmd_sock, (char *)cmd_recv_buf, sizeof(cmd_recv_buf), 0,
+                                (struct sockaddr *)&sender_addr, (socklen_t *)&sender_len);
+#endif
 
         if (recv_len > 10 && cmd_recv_buf[0] == 0xA5)
         {

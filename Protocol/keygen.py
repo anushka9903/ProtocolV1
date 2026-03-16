@@ -61,11 +61,11 @@ def save_to_file(key, filename):
             import stat
             os.chmod(filename, stat.S_IREAD | stat.S_IWRITE)
         
-        print(f"✓ Key saved to {filename}")
-        print(f"✓ File permissions set to read/write for owner only")
+        print(f"[OK]  Key saved to {filename}")
+        print(f"[OK]  File permissions set to read/write for owner only")
         return True
     except Exception as e:
-        print(f"✗ Error saving key: {e}", file=sys.stderr)
+        print(f"[FAILED]  Error saving key: {e}", file=sys.stderr)
         return False
 
 def main():

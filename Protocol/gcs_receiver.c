@@ -12,6 +12,7 @@
 #include "uavlink_fast.h"
 #include "monocypher.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -768,8 +769,13 @@ int main(int argc, char *argv[])
         // --- Receive telemetry + ACKs (non-blocking) ---
         struct sockaddr_in sender_addr;
         int sender_len = sizeof(sender_addr);
+#ifdef _WIN32
         int recv_len = recvfrom(recv_sock, (char *)recv_buf, sizeof(recv_buf), 0,
                                 (struct sockaddr *)&sender_addr, &sender_len);
+#else
+        int recv_len = recvfrom(recv_sock, (char *)recv_buf, sizeof(recv_buf), 0,
+                                (struct sockaddr *)&sender_addr, (socklen_t *)&sender_len);
+#endif
 
         if (recv_len > 0)
         {
