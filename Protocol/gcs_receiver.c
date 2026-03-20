@@ -42,6 +42,35 @@ static uint32_t get_time_ms(void)
 #endif
 }
 
+// Cryptographically secure random number generator
+static void secure_random(uint8_t *buf, size_t len)
+{
+#ifdef _WIN32
+    // Dynamically load RtlGenRandom from advapi32.dll (works on all MinGW versions)
+    typedef BOOLEAN (WINAPI *RtlGenRandomFunc)(PVOID, ULONG);
+    static RtlGenRandomFunc pRtlGenRandom = NULL;
+    if (!pRtlGenRandom) {
+        HMODULE hAdv = LoadLibraryA("advapi32.dll");
+        if (hAdv) pRtlGenRandom = (RtlGenRandomFunc)GetProcAddress(hAdv, "SystemFunction036");
+    }
+    if (pRtlGenRandom) {
+        pRtlGenRandom(buf, (ULONG)len);
+    } else {
+        fprintf(stderr, "FATAL: Cannot load RtlGenRandom\n");
+        exit(1);
+    }
+#else
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        fread(buf, 1, len, f);
+        fclose(f);
+    } else {
+        fprintf(stderr, "FATAL: Cannot open /dev/urandom\n");
+        exit(1);
+    }
+#endif
+}
+
 // ECDH Session Key State
 static uint8_t session_key[32] = {0};
 static uint8_t private_key[32] = {0};
@@ -554,10 +583,8 @@ int main(int argc, char *argv[])
     printf("Sending commands to %s:%u (direct UAV connection)\n", uav_ip, send_port);
     print_menu();
 
-    // Generate ECDH Keys
-    srand((unsigned int)time(NULL) ^ 0x6C73);
-    for (int i = 0; i < 32; i++)
-        private_key[i] = rand() & 0xFF;
+    // Generate ECDH Keys (using OS CSRNG)
+    secure_random(private_key, 32);
     crypto_x25519_public_key(public_key, private_key);
     printf("ECDH: GCS Public Key generated. Waiting for UAV connection...\n");
 
@@ -612,11 +639,14 @@ int main(int argc, char *argv[])
                 memcpy(kx.public_key, public_key, 32);
                 kx.seq_num = ecdh_seq_num;
 
-                // Create signature over (public_key || seq_num)
-                uint8_t data_to_sign[33];
-                memcpy(data_to_sign, public_key, 32);
-                data_to_sign[32] = ecdh_seq_num;
-                crypto_eddsa_sign(kx.signature, gcs_id_secret, data_to_sign, 33);
+                // Create signature over BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
+                uint8_t sig_input[76];
+                memcpy(sig_input,      public_key, 32);
+                memcpy(sig_input + 32, gcs_id_public, 32);
+                memcpy(sig_input + 64, "UAVLink-v1.2", 12);
+                uint8_t sig_hash[64];
+                crypto_blake2b(sig_hash, 64, sig_input, 76);
+                crypto_eddsa_sign(kx.signature, gcs_id_secret, sig_hash, 64);
 
                 uint8_t payload[97];
                 int payload_len = ul_serialize_key_exchange(&kx, payload);
@@ -854,10 +884,14 @@ int main(int argc, char *argv[])
                     }
 
                     // Authenticate incoming Key Exchange Request
-                    uint8_t data_to_sign[33];
-                    memcpy(data_to_sign, rx_kx.public_key, 32);
-                    data_to_sign[32] = rx_kx.seq_num;
-                    if (crypto_eddsa_check(rx_kx.signature, uav_id_public, data_to_sign, 33) != 0)
+                    // Verify BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
+                    uint8_t verify_input[76];
+                    memcpy(verify_input,      rx_kx.public_key, 32);
+                    memcpy(verify_input + 32, uav_id_public, 32);
+                    memcpy(verify_input + 64, "UAVLink-v1.2", 12);
+                    uint8_t verify_hash[64];
+                    crypto_blake2b(verify_hash, 64, verify_input, 76);
+                    if (crypto_eddsa_check(rx_kx.signature, uav_id_public, verify_hash, 64) != 0)
                     {
                         printf("\n  >>> ECDH FATAL: EdDSA signature verification failed. MITM detected!\n>>> ");
                         printf("[UAVLink] You shall not pass... without authentication.\n");
@@ -885,11 +919,14 @@ int main(int argc, char *argv[])
                     memcpy(kx_reply.public_key, public_key, 32);
                     kx_reply.seq_num = ecdh_seq_num;
 
-                    // Sign (public_key || seq_num)
-                    uint8_t kx_data_to_sign[33];
-                    memcpy(kx_data_to_sign, public_key, 32);
-                    kx_data_to_sign[32] = ecdh_seq_num;
-                    crypto_eddsa_sign(kx_reply.signature, gcs_id_secret, kx_data_to_sign, 33);
+                    // Sign BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
+                    uint8_t reply_sig_input[76];
+                    memcpy(reply_sig_input,      public_key, 32);
+                    memcpy(reply_sig_input + 32, gcs_id_public, 32);
+                    memcpy(reply_sig_input + 64, "UAVLink-v1.2", 12);
+                    uint8_t reply_sig_hash[64];
+                    crypto_blake2b(reply_sig_hash, 64, reply_sig_input, 76);
+                    crypto_eddsa_sign(kx_reply.signature, gcs_id_secret, reply_sig_hash, 64);
 
                     uint8_t kx_payload[97];
                     int kx_payload_len = ul_serialize_key_exchange(&kx_reply, kx_payload);

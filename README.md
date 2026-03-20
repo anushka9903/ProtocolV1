@@ -10,6 +10,7 @@ UAVLink is a high-performance binary communication protocol purpose-built for UA
 - ✅ **ARM NEON Hardware Acceleration** - 4x crypto speedup on ARM platforms with SIMD
 - ✅ **Phase 2 Optimizations** - Zero-copy parser (2x faster) + O(1) memory pool
 - ✅ **Phase 3 Advanced Features** - Delta encoding (57% bandwidth savings), LZ4 compression, Reed-Solomon FEC
+- ✅ **ECDH Handshake Hardening** - OS CSPRNG for ephemeral X25519 keys and BLAKE2b-bound signatures with protocol label
 - ✅ **82.8% Bandwidth Reduction** - Combined optimizations reduce telemetry from 3.68 kbps to 0.63 kbps
 - ✅ **Comprehensive Test Suite** - 33 tests across 10 categories with 100% pass rate
 - ✅ **Production-Ready Code** - All critical bugs identified and fixed through rigorous testing

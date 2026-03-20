@@ -28,6 +28,11 @@
 
 #include "monocypher.h"
 
+#define BLUE "\033[0;34m"
+#define RED "\033[0;31m"
+#define GREEN "\033[0;32m"
+#define RESET "\033[0m"
+
 // Cross-platform millisecond timer
 static uint32_t get_time_ms(void)
 {
@@ -37,6 +42,35 @@ static uint32_t get_time_ms(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+#endif
+}
+
+// Cryptographically secure random number generator
+static void secure_random(uint8_t *buf, size_t len)
+{
+#ifdef _WIN32
+    // Dynamically load RtlGenRandom from advapi32.dll (works on all MinGW versions)
+    typedef BOOLEAN (WINAPI *RtlGenRandomFunc)(PVOID, ULONG);
+    static RtlGenRandomFunc pRtlGenRandom = NULL;
+    if (!pRtlGenRandom) {
+        HMODULE hAdv = LoadLibraryA("advapi32.dll");
+        if (hAdv) pRtlGenRandom = (RtlGenRandomFunc)GetProcAddress(hAdv, "SystemFunction036");
+    }
+    if (pRtlGenRandom) {
+        pRtlGenRandom(buf, (ULONG)len);
+    } else {
+        fprintf(stderr, "FATAL: Cannot load RtlGenRandom\n");
+        exit(1);
+    }
+#else
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        fread(buf, 1, len, f);
+        fclose(f);
+    } else {
+        fprintf(stderr, "FATAL: Cannot open /dev/urandom\n");
+        exit(1);
+    }
 #endif
 }
 
@@ -261,7 +295,7 @@ static void send_ack(int sock, struct sockaddr_in *dest,
 int main(int argc, char *argv[])
 {
     printf("=== UAVLink Bidirectional UAV Simulator ===\n\n");
-    printf("[UAVLink] Hello, friend.\n\n");
+    printf(BLUE "[UAVLink] Hello, friend." RESET "\n\n");
 
     // Determine GCS IP and Ports
     const char *gcs_ip = "127.0.0.1";
@@ -294,18 +328,20 @@ int main(int argc, char *argv[])
     FILE *f_uav_seed = fopen("uav_id_seed.bin", "rb");
     if (!f_uav_seed || fread(uav_id_seed, 1, 32, f_uav_seed) != 32)
     {
-        printf("ERROR: Could not load uav_id_seed.bin (generate with keygen.py)\n");
+        printf(RED "ERROR: Could not load uav_id_seed.bin (generate with keygen.py)\n" RESET);
         return 1;
     }
-    if (f_uav_seed) fclose(f_uav_seed);
+    if (f_uav_seed)
+        fclose(f_uav_seed);
 
     FILE *f_gcs_pub = fopen("gcs_pub.bin", "rb");
     if (!f_gcs_pub || fread(gcs_id_public, 1, 32, f_gcs_pub) != 32)
     {
-        printf("ERROR: Could not load gcs_pub.bin (generate with id_gen.exe)\n");
+        printf(RED "ERROR: Could not load gcs_pub.bin (generate with id_gen.exe)\n" RESET);
         return 1;
     }
-    if (f_gcs_pub) fclose(f_gcs_pub);
+    if (f_gcs_pub)
+        fclose(f_gcs_pub);
 
     crypto_eddsa_key_pair(uav_id_secret, uav_id_public, uav_id_seed);
     printf("Identity loaded: EdDSA Keys loaded successfully\n");
@@ -363,7 +399,7 @@ int main(int argc, char *argv[])
 
     if (bind(cmd_sock, (struct sockaddr *)&cmd_bind_addr, sizeof(cmd_bind_addr)) < 0)
     {
-        printf("ERROR: Failed to bind command socket to port %u\n", listen_port);
+        printf(RED "ERROR: Failed to bind command socket to port %u\n" RESET, listen_port);
         return 1;
     }
 
@@ -381,10 +417,8 @@ int main(int argc, char *argv[])
     printf("Status: DISARMED | Mode: MANUAL\n");
     printf("Waiting for commands...\n\n");
 
-    // Generate ECDH Keys
-    srand((unsigned int)time(NULL) ^ 0x0A0B);
-    for (int i = 0; i < 32; i++)
-        private_key[i] = rand() & 0xFF;
+    // Generate ECDH Keys (using OS CSRNG)
+    secure_random(private_key, 32);
     crypto_x25519_public_key(public_key, private_key);
     printf("ECDH: UAV Public Key generated. Waiting for GCS connection...\n");
 
@@ -519,12 +553,16 @@ int main(int argc, char *argv[])
                         }
 
                         // Authenticate incoming Key Exchange Request
-                        uint8_t data_to_sign[33];
-                        memcpy(data_to_sign, rx_kx.public_key, 32);
-                        data_to_sign[32] = rx_kx.seq_num;
-                        if (crypto_eddsa_check(rx_kx.signature, gcs_id_public, data_to_sign, 33) != 0)
+                        // Verify BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
+                        uint8_t verify_input[76];
+                        memcpy(verify_input,      rx_kx.public_key, 32);
+                        memcpy(verify_input + 32, gcs_id_public, 32);
+                        memcpy(verify_input + 64, "UAVLink-v1.2", 12);
+                        uint8_t verify_hash[64];
+                        crypto_blake2b(verify_hash, 64, verify_input, 76);
+                        if (crypto_eddsa_check(rx_kx.signature, gcs_id_public, verify_hash, 64) != 0)
                         {
-                            printf("  >>> ECDH FATAL: EdDSA signature verification failed. MITM detected!\n");
+                            printf(RED "  >>> ECDH FATAL: EdDSA signature verification failed. MITM detected!\n" RESET);
                             break;
                         }
 
@@ -548,10 +586,14 @@ int main(int argc, char *argv[])
                         memcpy(kx_reply.public_key, public_key, 32);
                         kx_reply.seq_num = ecdh_seq_num;
 
-                        // Re-use data_to_sign for signing our key
-                        memcpy(data_to_sign, public_key, 32);
-                        data_to_sign[32] = ecdh_seq_num;
-                        crypto_eddsa_sign(kx_reply.signature, uav_id_secret, data_to_sign, 33);
+                        // Sign BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
+                        uint8_t reply_sig_input[76];
+                        memcpy(reply_sig_input,      public_key, 32);
+                        memcpy(reply_sig_input + 32, uav_id_public, 32);
+                        memcpy(reply_sig_input + 64, "UAVLink-v1.2", 12);
+                        uint8_t reply_sig_hash[64];
+                        crypto_blake2b(reply_sig_hash, 64, reply_sig_input, 76);
+                        crypto_eddsa_sign(kx_reply.signature, uav_id_secret, reply_sig_hash, 64);
 
                         uint8_t kx_payload[97];
                         int kx_payload_len = ul_serialize_key_exchange(&kx_reply, kx_payload);
@@ -582,8 +624,8 @@ int main(int argc, char *argv[])
                         ecdh_retry_count = 0;
                         ecdh_last_send_time = get_time_ms();
 
-                        printf("  >>> ECDH: Session ESTABLISHED! (received GCS key, sent UAV key)\n");
-                        printf("[UAVLink] Unicorn, Alpha, Victor. Link is hot.\n");
+                        printf(GREEN "  >>> ECDH: Session ESTABLISHED! (received GCS key, sent UAV key)\n" RESET);
+                        printf(BLUE "[UAVLink] Uniform, Alpha, Victor. Link is hot !!" RESET "\n");
                         fflush(stdout);
 
                         // Send ACK when we receive KEY_EXCHANGE
@@ -627,21 +669,26 @@ int main(int argc, char *argv[])
                         {
                             // Check if session_key is valid (not all zeros)
                             bool has_key = false;
-                            for (int i = 0; i < 32; i++) {
-                                if (session_key[i] != 0) {
+                            for (int i = 0; i < 32; i++)
+                            {
+                                if (session_key[i] != 0)
+                                {
                                     has_key = true;
                                     break;
                                 }
                             }
 
-                            if (has_key) {
+                            if (has_key)
+                            {
                                 // We have session_key, mark ESTABLISHED
                                 ecdh_state = UL_ECDH_ESTABLISHED;
                                 ecdh_retry_count = 0;
                                 printf("  >>> ECDH: Received ACK for seq=%u, session ESTABLISHED!\n", ecdh_seq_num);
-                                printf("[UAVLink] Unicorn, Alpha, Victor. Link is hot.\n");
+                                printf(BLUE "[UAVLink] Uniform, Alpha, Victor. Link is hot.\n" RESET);
                                 fflush(stdout);
-                            } else {
+                            }
+                            else
+                            {
                                 printf("  >>> ECDH: Received ACK for seq=%u (waiting for GCS KEY_EXCHANGE)\n", ecdh_seq_num);
                             }
                         }
@@ -747,7 +794,7 @@ int main(int argc, char *argv[])
                             }
                             else
                             {
-                                printf("  >>> Reassembly error: %d\n", reasm_result);
+                                printf(RED "  >>> Reassembly error: %d\n" RESET, reasm_result);
                             }
                         }
                         else
@@ -836,11 +883,14 @@ int main(int argc, char *argv[])
                 memcpy(kx.public_key, public_key, 32);
                 kx.seq_num = ecdh_seq_num;
 
-                // Create signature over (public_key || seq_num)
-                uint8_t data_to_sign[33];
-                memcpy(data_to_sign, public_key, 32);
-                data_to_sign[32] = ecdh_seq_num;
-                crypto_eddsa_sign(kx.signature, uav_id_secret, data_to_sign, 33);
+                // Create signature over BLAKE2b(x25519_pub || ed25519_pub || "UAVLink-v1.2")
+                uint8_t sig_input[76];
+                memcpy(sig_input,      public_key, 32);
+                memcpy(sig_input + 32, uav_id_public, 32);
+                memcpy(sig_input + 64, "UAVLink-v1.2", 12);
+                uint8_t sig_hash[64];
+                crypto_blake2b(sig_hash, 64, sig_input, 76);
+                crypto_eddsa_sign(kx.signature, uav_id_secret, sig_hash, 64);
 
                 uint8_t payload[97];
                 int payload_len = ul_serialize_key_exchange(&kx, payload);
