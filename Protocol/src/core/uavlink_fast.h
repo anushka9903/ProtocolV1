@@ -49,6 +49,14 @@ typedef struct
     uint8_t cipher_tag[16];  // Authentication tag
     uint8_t *last_payload;   // Pointer to completed payload (valid after result==1)
 
+    /* Bug-B FIX fields: fragmented flag decoded from base header and exposed to callers */
+    bool fragmented;         /* Raw fragmented bit from header_buf[3] */
+    bool out_fragmented;     /* Fragmented flag for the most recently completed packet */
+    uint16_t out_sequence;   /* Sequence number for the most recently completed packet */
+
+    /* Bug-1 FIX field: caller provides session key so the ZC parser can do MAC verify */
+    const uint8_t *key_32b;  /* 32-byte session key (NULL = allow unencrypted only) */
+
     // CRC Context
     uint16_t crc_in;        // Incoming CRC from packet
     uint16_t crc_calc;      // Calculated CRC for validation

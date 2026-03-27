@@ -75,16 +75,15 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
 
             if (parser->payload_len > UL_MAX_PAYLOAD_SIZE)
             {
-                parser->state = 0; // IDLE
+                parser->state = 0;
                 parser->error_count++;
                 return -1;
             }
 
-            // Extract stream_type now so EXT_HDR can detect CMD/CMD_ACK
-            // stream_type = bits[3:2] from buf[1] low 2 bits, bits[1:0] from buf[2] high 2 bits
-            parser->stream_type = ((byte1 & 0x3) << 2) | ((byte2 >> 6) & 0x3);
+            /* Decode fragmented flag from byte3 bit 2 */
+            parser->fragmented = (byte3 & UL_FLAG_FRAGMENTED) != 0;
 
-            // Always go to extended header to read system/component/message IDs
+            parser->stream_type = ((byte1 & 0x3) << 2) | ((byte2 >> 6) & 0x3);
             parser->state = 2; // EXT_HDR
         }
         break;
@@ -119,35 +118,43 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
 
         if (encrypted)
         {
-            // Layout: routing (8 or 9 bytes) + nonce (8 bytes)
-            // Total header_buf bytes = routing_end + 8
             uint16_t nonce_end = routing_end + 8u;
 
+            /* BUG-5 FIX: nonce extraction condition was `== nonce_end` but the transition to
+               PAYLOAD also fires at `>= nonce_end` — they match, so this is fine. However the
+               original code always branched on `==` first and `>=` second, meaning nonce_end
+               was reached twice if nonce_end happened to be skipped. Make both conditions
+               identical to be safe. */
             if (parser->bytes_received == nonce_end)
             {
-                // Extract nonce: 8 bytes immediately after routing section
                 memcpy(parser->cipher_nonce, &parser->header_buf[routing_end], 8);
-            }
-
-            if (parser->bytes_received >= nonce_end)
-            {
                 parser->state = 3; // PAYLOAD
                 parser->bytes_received = 0;
             }
         }
         else
         {
-            // Unencrypted: header ends after routing section
             if (parser->bytes_received >= routing_end)
             {
-                parser->state = 3; // PAYLOAD
+                /* BUG-A FIX: If payload_len == 0, skip PAYLOAD state entirely and go
+                   directly to CRC. The PAYLOAD case only fires when bytes_received < payload_len,
+                   so with payload_len=0 the parser would hang forever in state 3. */
+                if (parser->payload_len == 0)
+                {
+                    parser->state = 4; // CRC
+                }
+                else
+                {
+                    parser->state = 3; // PAYLOAD
+                }
                 parser->bytes_received = 0;
             }
         }
         break;
 
     case 3: // PAYLOAD
-        // Zero-copy: write directly to output buffer
+        /* BUG-A FIX: payload_len==0 packets never enter this case (transitioned
+           directly to CRC in EXT_HDR). The check below is still here for safety. */
         if (parser->bytes_received < parser->payload_len)
         {
             if (parser->bytes_received < output_buf_size)
@@ -156,7 +163,7 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
             }
             else
             {
-                parser->state = 0; // IDLE
+                parser->state = 0;
                 parser->error_count++;
                 return -1;
             }
@@ -164,16 +171,11 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
 
             if (parser->bytes_received >= parser->payload_len)
             {
-                // Check if we need to read MAC tag for encrypted packets
                 bool encrypted = (parser->header_buf[3] & UL_FLAG_ENCRYPTED) != 0;
                 if (encrypted)
-                {
-                    parser->state = 5; // MAC_TAG (16 bytes for encrypted)
-                }
+                    parser->state = 5; // MAC_TAG
                 else
-                {
-                    parser->state = 4; // CRC (2 bytes for unencrypted)
-                }
+                    parser->state = 4; // CRC
                 parser->bytes_received = 0;
             }
         }
@@ -234,10 +236,98 @@ int ul_parse_char_zerocopy(ul_parser_zerocopy_t *parser, uint8_t byte, uint8_t *
                 return UL_ERR_CRC;
             }
 
+            /* BUG-1 FIX: Zero-copy parser skipped MAC authentication and replay check.
+               The original code returned success after CRC alone, allowing an attacker to
+               forge encrypted packets whose ciphertext was never MAC-verified. */
+            bool is_encrypted = (parser->header_buf[3] & UL_FLAG_ENCRYPTED) != 0;
+            if (is_encrypted)
+            {
+                /* MAC tag was collected in cipher_tag[]; nonce in cipher_nonce[].
+                   Build the 24-byte nonce monocypher expects (pad with zeros). */
+                uint8_t nonce24[24] = {0};
+                memcpy(nonce24, parser->cipher_nonce, 8);
+
+                /* Determine header (AAD) length */
+                bool is_cmd = (parser->stream_type == UL_STREAM_CMD ||
+                               parser->stream_type == UL_STREAM_CMD_ACK);
+                int routing_end = is_cmd ? 9 : 8;
+                int aad_len = routing_end + 8; /* routing + nonce */
+
+                /* Caller must set parser->key_32b before parsing encrypted packets */
+                if (!parser->key_32b)
+                {
+                    ul_parser_zerocopy_init(parser);
+                    parser->error_count++;
+                    return UL_ERR_NO_KEY;
+                }
+
+                extern int crypto_aead_unlock(
+                    uint8_t *plain_text, const uint8_t mac[16], const uint8_t key[32],
+                    const uint8_t nonce[24], const uint8_t *ad, size_t ad_size,
+                    const uint8_t *cipher_text, size_t text_size);
+
+                /* Use a separate plaintext buffer to avoid aliasing (same lesson as BUG-01) */
+                uint8_t decrypted[UL_MAX_PAYLOAD_SIZE];
+                int auth = crypto_aead_unlock(
+                    decrypted, parser->cipher_tag, parser->key_32b, nonce24,
+                    parser->header_buf, aad_len,
+                    parser->output_payload, parser->payload_len);
+
+                if (auth != 0)
+                {
+                    ul_parser_zerocopy_init(parser);
+                    parser->error_count++;
+                    return UL_ERR_MAC_VERIFICATION;
+                }
+                memcpy(parser->output_payload, decrypted, parser->payload_len);
+            }
+
+            /* Replay protection — same sliding-window logic as uavlink.c */
+            uint16_t seq = ((uint16_t)(parser->header_buf[3] & 0x3) << 10)
+                         | (((uint16_t)parser->header_buf[4] << 8 | parser->header_buf[5]) >> 6);
+            if (parser->replay_init)
+            {
+                int16_t diff = (int16_t)(seq - parser->last_seq);
+                if (diff > 2047)  diff -= 4096;
+                if (diff < -2048) diff += 4096;
+                if (diff <= 0)
+                {
+                    uint8_t offset = (uint8_t)(-diff);
+                    if (offset >= 32 || (parser->replay_window & (1UL << offset)))
+                    {
+                        ul_parser_zerocopy_init(parser);
+                        parser->error_count++;
+                        return UL_ERR_REPLAY;
+                    }
+                    parser->replay_window |= (1UL << offset);
+                }
+                else
+                {
+                    uint8_t shift = (uint8_t)diff;
+                    parser->replay_window = (shift >= 32) ? 0 : (parser->replay_window << shift);
+                    parser->replay_window |= 1UL;
+                    parser->last_seq = seq;
+                }
+            }
+            else
+            {
+                parser->replay_init = 1;
+                parser->last_seq = seq;
+                parser->replay_window = 1UL;
+            }
+
+            /* BUG-B FIX: Populate header fields so callers can read fragmented/sequence.
+               The original code returned 1 (success) without ever writing parsed header
+               fields into a struct the caller could inspect, so rx_hdr.fragmented was always
+               false for fragmented packets parsed via the zero-copy path. */
+            parser->out_fragmented = parser->fragmented;
+            parser->out_sequence   = seq;
+
             // Success!
             parser->state = 0;
             parser->bytes_received = 0;
-            return 1; // Complete packet
+            parser->rx_count++;
+            return 1; /* Complete packet */
         }
         break;
 

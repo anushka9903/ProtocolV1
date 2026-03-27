@@ -437,8 +437,11 @@ void ul_chacha20_auto(const uint8_t key[32], const uint8_t nonce[8],
 {
     if (!g_hw_crypto_enabled)
     {
-        // Hardware crypto disabled, use software
-        crypto_chacha20_djb(output, input, len, key, nonce, 0);
+        /* BUG-3 FIX: Software fallback must use counter=1 to match the hardware
+           paths (NEON/SSE2/AVX2 all call their functions with initial_counter=1).
+           Using counter=0 here produced ciphertext incompatible with the hw paths
+           and with monocypher's crypto_aead_lock which also begins at block 1. */
+        crypto_chacha20_djb(output, input, len, key, nonce, 1);
         return;
     }
 

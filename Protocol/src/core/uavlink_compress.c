@@ -37,7 +37,7 @@ int ul_lz4_compress(const uint8_t *input, size_t input_len,
     size_t out_pos = 0;
     size_t in_pos = 0;
 
-    while (in_pos < input_len && out_pos < max_output - 2)
+    while (in_pos < input_len)
     {
         uint8_t byte = input[in_pos];
         size_t run = 1;
@@ -52,31 +52,30 @@ int ul_lz4_compress(const uint8_t *input, size_t input_len,
 
         if (run >= 3)
         {
-            // Encode as: FLAG(0xFF) + BYTE + COUNT
+            /* BUG-D FIX: Return error (not truncated output) if buffer is full.
+               The original code used `break` which silently returned a partial
+               compressed stream that the decompressor cannot reconstruct. */
             if (out_pos + 3 > max_output)
-                break;
-            output[out_pos++] = 0xFF; // Run marker
+                return -1; /* Buffer full — caller must provide a larger buffer */
+            output[out_pos++] = 0xFF;
             output[out_pos++] = byte;
             output[out_pos++] = (uint8_t)run;
             in_pos += run;
         }
         else
         {
-            // Literal byte: if it equals the run marker, escape it so the
-            // decompressor cannot mistake it for a run-length sequence.
-            // Encoding: 0xFF 0xFF 0x01  means a single literal 0xFF byte.
             if (byte == 0xFF)
             {
                 if (out_pos + 3 > max_output)
-                    break;
-                output[out_pos++] = 0xFF; // Escape
-                output[out_pos++] = 0xFF; // The literal value
-                output[out_pos++] = 0x01; // Count = 1
+                    return -1;
+                output[out_pos++] = 0xFF;
+                output[out_pos++] = 0xFF;
+                output[out_pos++] = 0x01;
             }
             else
             {
                 if (out_pos + 1 > max_output)
-                    break;
+                    return -1;
                 output[out_pos++] = byte;
             }
             in_pos++;
@@ -195,14 +194,18 @@ void ul_fec_decoder_init(ul_fec_decoder_t *decoder,
     memset(decoder, 0, sizeof(ul_fec_decoder_t));
     decoder->params.data_shards = data_shards;
     decoder->params.parity_shards = parity_shards;
-    decoder->params.shard_size = 255;
+    /* BUG-C FIX: Do NOT hardcode shard_size to 255 here.
+       It will be set dynamically from the first received shard in ul_fec_add_shard.
+       Hardcoding 255 caused ul_fec_decode to XOR/copy 255 bytes per shard even
+       when the actual shards were much smaller, producing corrupt output. */
+    decoder->params.shard_size = 0; /* Will be set on first ul_fec_add_shard call */
     decoder->initialized = true;
 }
 
 int ul_fec_add_shard(ul_fec_decoder_t *decoder, uint8_t shard_index,
                      const uint8_t *shard_data, size_t shard_size)
 {
-    if (!decoder || shard_index >= 32 || !shard_data)
+    if (!decoder || shard_index >= 32 || !shard_data || shard_size == 0)
     {
         return -1;
     }
@@ -213,26 +216,27 @@ int ul_fec_add_shard(ul_fec_decoder_t *decoder, uint8_t shard_index,
         return -1;
     }
 
+    /* BUG-C FIX: Record actual shard_size from the first received shard.
+       All shards in a session are the same size; using the real size prevents
+       ul_fec_decode from XOR/copying 255 garbage bytes when shards are smaller. */
+    if (decoder->params.shard_size == 0)
+        decoder->params.shard_size = (uint8_t)shard_size;
+
     if (!decoder->shard_present[shard_index])
     {
         decoder->shard_present[shard_index] = true;
 
-        /* BUG-06 FIX: Copy shard data into the decoder-owned buffer instead of
-           storing the caller's pointer. The original code stored a raw pointer
-           that could become dangling if the caller's buffer was freed or went out
-           of scope before ul_fec_decode() was called. */
+        /* BUG-06 FIX (previous session): Copy shard data into the decoder-owned buffer
+           to prevent dangling pointers if the caller's buffer is freed before decode. */
         memcpy(decoder->shard_data[shard_index], shard_data, shard_size);
         decoder->shards[shard_index] = decoder->shard_data[shard_index];
         decoder->shards_received++;
     }
 
-    // Need at least data_shards packets to decode
     if (decoder->shards_received >= decoder->params.data_shards)
-    {
-        return 1; // Ready to decode
-    }
+        return 1; /* Ready to decode */
 
-    return 0; // Need more shards
+    return 0; /* Need more shards */
 }
 
 int ul_fec_decode(ul_fec_decoder_t *decoder, uint8_t *output)
@@ -307,12 +311,19 @@ int ul_fec_decode(ul_fec_decoder_t *decoder, uint8_t *output)
         }
     }
 
-    // Fallback: copy available data shards only
+    /* BUG-E FIX: Fallback for >1 missing shard or no parity available.
+       The original code skipped missing shards but still advanced total_size,
+       leaving uninitialized holes in the output buffer. Zero-init missing slots. */
     for (uint8_t i = 0; i < decoder->params.data_shards; i++)
     {
         if (decoder->shard_present[i] && decoder->shards[i])
         {
             memcpy(output + total_size, decoder->shards[i], shard_size);
+        }
+        else
+        {
+            /* Zero the hole so callers always get a fully initialized buffer */
+            memset(output + total_size, 0, shard_size);
         }
         total_size += shard_size;
     }

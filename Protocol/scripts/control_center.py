@@ -66,20 +66,22 @@ class GaugeWidget(QGroupBox):
     def __init__(self, title, unit="", min_val=0, max_val=100):
         super().__init__(title)
         self.unit = unit
-        self.layout = QVBoxLayout()
+        # BUG-F FIX: do NOT use self.layout — that shadows QWidget.layout() built-in
+        # which is called internally by Qt and causes a crash. Renamed to self._layout.
+        self._layout = QVBoxLayout()
         self.value_label = QLabel("0" + unit)
         self.value_label.setAlignment(Qt.AlignCenter)
         self.value_label.setStyleSheet(f"font-size: 22px; font-weight: 600; color: {COLORS['primary']};")
         self.progress = QProgressBar()
-        self.progress.setRange(min_val * 10, max_val * 10) # 0.1 precision
+        self.progress.setRange(min_val * 10, max_val * 10)
         self.progress.setTextVisible(False)
         self.progress.setStyleSheet("""
             QProgressBar { border: 1px solid #2B3240; border-radius: 6px; background-color: #0F131B; height: 10px; }
             QProgressBar::chunk { background-color: #23D3B0; border-radius: 6px; }
         """)
-        self.layout.addWidget(self.value_label)
-        self.layout.addWidget(self.progress)
-        self.setLayout(self.layout)
+        self._layout.addWidget(self.value_label)
+        self._layout.addWidget(self.progress)
+        self.setLayout(self._layout)
 
     def set_value(self, val):
         self.value_label.setText(f"{val:.1f}{self.unit}")
@@ -514,6 +516,10 @@ class UAVLinkControlCenter(QMainWindow):
                     self.btn_toggle_uav.setText("START UAV")
                     self.uav_status.setText("OFFLINE")
                     self.uav_status.setStyleSheet(f"color: {COLORS['error']};")
+                    # BUG-B FIX: When the UAV process dies the encrypted session is gone.
+                    # The header badge and Link Security label must revert to INSECURE so
+                    # the operator knows the link is no longer authenticated.
+                    self.set_session_secure(False)
                 elif name == "ADVERSARIAL":
                     self.btn_toggle_adversarial.setText("START ADVERSARIAL")
                     self.adversarial_status.setText("OFFLINE")
