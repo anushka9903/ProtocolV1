@@ -148,7 +148,7 @@ Security Notes:
     
     if not args.save:
         print(f"\n{'='*70}")
-        print("⚠️  SECURITY WARNING")
+        print("SECURITY WARNING !!")
         print('='*70)
         print("• Never commit keys to version control")
         print("• Store keys in secure locations (encrypted volume recommended)")

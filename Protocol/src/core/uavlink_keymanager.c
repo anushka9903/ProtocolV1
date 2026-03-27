@@ -251,45 +251,47 @@ int ul_load_key_from_env(const char *var_name, uint8_t key_out[32], int format)
     return UL_KEY_ERR_FORMAT;
 }
 
-// Generate random key (using Cryptographically Secure PRNG)
-void ul_generate_random_key(uint8_t key_out[32])
+/* BUG-10 FIX: Return int (0 = success, -1 = failure) so callers never
+ * unknowingly use a zeroed key when Cryptographically Secure Pseudorandom Number Generator (CSPRNG) initialisation fails. */
+int ul_generate_random_key(uint8_t key_out[32])
 {
     if (key_out == NULL)
-        return;
+        return -1;
 
 #ifdef _WIN32
     HCRYPTPROV hProvider;
-    if (CryptAcquireContext(&hProvider, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
-    {
-        if (!CryptGenRandom(hProvider, 32, key_out))
-        {
-            fprintf(stderr, "ERROR: CryptGenRandom failed!\n");
-            ul_secure_zero(key_out, 32);
-        }
-        CryptReleaseContext(hProvider, 0);
-    }
-    else
+    if (!CryptAcquireContext(&hProvider, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
     {
         fprintf(stderr, "ERROR: Failed to acquire Windows Crypto Context!\n");
         ul_secure_zero(key_out, 32);
+        return -1;
     }
+    if (!CryptGenRandom(hProvider, 32, key_out))
+    {
+        fprintf(stderr, "ERROR: CryptGenRandom failed!\n");
+        CryptReleaseContext(hProvider, 0);
+        ul_secure_zero(key_out, 32);
+        return -1;
+    }
+    CryptReleaseContext(hProvider, 0);
+    return 0;
 #else
     FILE *f = fopen("/dev/urandom", "rb");
-    if (f != NULL)
-    {
-        size_t bytes = fread(key_out, 1, 32, f);
-        fclose(f);
-        if (bytes != 32)
-        {
-            fprintf(stderr, "ERROR: Failed to read sufficient entropy from /dev/urandom\n");
-            ul_secure_zero(key_out, 32);
-        }
-    }
-    else
+    if (f == NULL)
     {
         fprintf(stderr, "ERROR: Cannot open /dev/urandom\n");
         ul_secure_zero(key_out, 32);
+        return -1;
     }
+    size_t bytes = fread(key_out, 1, 32, f);
+    fclose(f);
+    if (bytes != 32)
+    {
+        fprintf(stderr, "ERROR: Failed to read sufficient entropy from /dev/urandom\n");
+        ul_secure_zero(key_out, 32);
+        return -1;
+    }
+    return 0;
 #endif
 }
 

@@ -101,9 +101,12 @@ int ul_lz4_decompress(const uint8_t *input, size_t input_len,
     {
         uint8_t byte = input[in_pos++];
 
-        if (byte == 0xFF && in_pos + 1 < input_len)
+        /* BUG-05 FIX: Require at least 2 more bytes (value + count) before reading.
+           The original check `in_pos + 1 < input_len` only guaranteed 1 remaining byte,
+           causing an out-of-bounds read on the count byte for truncated inputs. */
+        if (byte == 0xFF && in_pos + 2 <= input_len)
         {
-            // Run-length encoded
+            // Run-length encoded: FLAG(0xFF) + value + count
             uint8_t value = input[in_pos++];
             uint8_t count = input[in_pos++];
 
@@ -114,7 +117,7 @@ int ul_lz4_decompress(const uint8_t *input, size_t input_len,
         }
         else
         {
-            // Literal byte
+            // Literal byte (also handles truncated 0xFF at end of input)
             output[out_pos++] = byte;
         }
     }
@@ -204,10 +207,22 @@ int ul_fec_add_shard(ul_fec_decoder_t *decoder, uint8_t shard_index,
         return -1;
     }
 
+    /* Guard: shard_size must fit inside the owned 256-byte buffer slot */
+    if (shard_size > sizeof(decoder->shard_data[0]))
+    {
+        return -1;
+    }
+
     if (!decoder->shard_present[shard_index])
     {
         decoder->shard_present[shard_index] = true;
-        decoder->shards[shard_index] = (uint8_t *)shard_data;
+
+        /* BUG-06 FIX: Copy shard data into the decoder-owned buffer instead of
+           storing the caller's pointer. The original code stored a raw pointer
+           that could become dangling if the caller's buffer was freed or went out
+           of scope before ul_fec_decode() was called. */
+        memcpy(decoder->shard_data[shard_index], shard_data, shard_size);
+        decoder->shards[shard_index] = decoder->shard_data[shard_index];
         decoder->shards_received++;
     }
 
@@ -404,7 +419,10 @@ int ul_delta_encode_gps(ul_delta_ctx_t *ctx, const ul_gps_raw_t *gps,
 
         ctx->prev_gps = *gps;
         g_phase3_stats.delta_encoded_packets++;
-        g_phase3_stats.delta_bytes_saved += (sizeof(ul_gps_raw_t) - pos + 1);
+        /* BUG-11 FIX: Guard against uint32_t underflow when large deltas make the
+           encoded output larger than the raw struct. Also removed the spurious +1. */
+        if (sizeof(ul_gps_raw_t) > pos)
+            g_phase3_stats.delta_bytes_saved += (uint32_t)(sizeof(ul_gps_raw_t) - pos);
     }
 
     return (int)pos;

@@ -18,7 +18,8 @@ typedef enum
     UL_ERR_MAC_VERIFICATION = -3,
     UL_ERR_BUFFER_OVERFLOW = -4,
     UL_ERR_INVALID_HEADER = -5,
-    UL_ERR_NULL_POINTER = -6
+    UL_ERR_NULL_POINTER = -6,
+    UL_ERR_REPLAY = -7           /* Packet rejected by replay-protection window */
 } ul_error_t;
 
 /* Base header byte 0 */
@@ -347,6 +348,16 @@ typedef struct
 } ul_reassembly_ctx_t;
 
 void ul_reassembly_init(ul_reassembly_ctx_t *ctx);
+
+/* BUG-09 FIX: timed variant evicts stale slots before adding the new fragment.
+   Pass the current time in milliseconds (e.g. from GetTickCount / clock_gettime).
+   Use this instead of ul_reassembly_add whenever a system clock is available. */
+int ul_reassembly_add_timed(ul_reassembly_ctx_t *ctx, const ul_header_t *hdr,
+                             const uint8_t *payload, uint16_t payload_len,
+                             uint8_t *output, uint16_t *output_len,
+                             uint32_t now_ms);
+
+/* Legacy variant (no timeout eviction — kept for backward compat) */
 int ul_reassembly_add(ul_reassembly_ctx_t *ctx, const ul_header_t *hdr,
                       const uint8_t *payload, uint16_t payload_len,
                       uint8_t *output, uint16_t *output_len);

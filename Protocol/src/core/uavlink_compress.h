@@ -108,8 +108,9 @@ typedef struct
 typedef struct
 {
     ul_fec_params_t params;
-    uint8_t *shards[32];    // Mixed data + parity shards
-    bool shard_present[32]; // Which shards have been received
+    uint8_t shard_data[32][256]; /* BUG-06 FIX: owned copies of received shards (max 32 shards x 255-byte max) */
+    uint8_t *shards[32];         /* Pointers into shard_data[] — never dangling */
+    bool shard_present[32];      /* Which shards have been received */
     uint8_t shards_received;
     bool initialized;
 } ul_fec_decoder_t;

@@ -217,34 +217,44 @@ static uint16_t float_to_half(float f)
 
 static float half_to_float(uint16_t h)
 {
-    uint32_t x = ((h & 0x8000) << 16);
-    int32_t e = (h >> 10) & 0x1F;
+    /* BUG-04 FIX: Correct IEEE 754 half→float32 conversion including subnormals.
+       Previous code double-shifted the mantissa (shift + 13) which corrupted
+       any subnormal value (very small angular rates near zero). */
+    uint32_t x;
+    int32_t  e = (h >> 10) & 0x1F;
+
     if (e == 0)
     {
-        // Subnormal: handle mantissa != 0 (value = mantissa * 2^-24)
         uint32_t mantissa = h & 0x3FF;
         if (mantissa != 0)
         {
-            x |= (mantissa << 13); // Place mantissa bits
-            // Normalize: find highest set bit
+            /* Normalize: count leading zeros to find the implicit leading 1 */
             int shift = 0;
             uint32_t m = mantissa;
-            while ((m & 0x200) == 0)
-            {
-                m <<= 1;
-                shift++;
-            }
-            x = ((h & 0x8000) << 16) | ((127 - 15 - shift) << 23) | ((mantissa << (shift + 13)) & 0x7FFFFF);
+            while ((m & 0x400) == 0) { m <<= 1; shift++; }
+            m &= 0x3FF; /* Remove the implicit leading 1 */
+            /* Exponent: 127 - 14 - shift (float32 bias=127, half bias=14 for subnormals) */
+            x = ((uint32_t)(h & 0x8000) << 16)
+              | ((uint32_t)(127 - 14 - shift) << 23)
+              | (m << 13);
         }
-        // mantissa == 0 means ±0.0, x is correct already
+        else
+        {
+            x = (uint32_t)(h & 0x8000) << 16; /* ±0.0 */
+        }
     }
     else if (e == 31)
     {
-        x |= 0x7F800000;
+        /* Inf / NaN */
+        x = ((uint32_t)(h & 0x8000) << 16) | 0x7F800000
+          | ((uint32_t)(h & 0x3FF) << 13);
     }
     else
     {
-        x |= ((e - 15 + 127) << 23) | ((h & 0x3FF) << 13);
+        /* Normalized number */
+        x = ((uint32_t)(h & 0x8000) << 16)
+          | ((uint32_t)(e - 15 + 127) << 23)
+          | ((uint32_t)(h & 0x3FF) << 13);
     }
     float f;
     memcpy(&f, &x, sizeof(f));
@@ -1160,9 +1170,11 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
                         uint8_t offset = (uint8_t)(-diff);
                         if (offset >= 32 || (p->replay_window & (1UL << offset)))
                         {
-                            /* Outside window or already seen: replay */
+                            /* BUG-02 FIX: Return UL_ERR_REPLAY (not UL_ERR_CRC) so
+                               callers can distinguish replay attacks from link errors. */
                             ul_parser_init(p);
-                            return UL_ERR_CRC; /* Reuse error code for replay */
+                            p->error_count++;
+                            return UL_ERR_REPLAY;
                         }
                         p->replay_window |= (1UL << offset);
                     }
@@ -1191,7 +1203,8 @@ int ul_parse_char(ul_parser_t *p, uint8_t c, const uint8_t *key_32b)
         }
         break;
     }
-    return 1; // Still parsing (need more bytes)
+    return 0; /* BUG-03 FIX: Return 0 (not 1) while more bytes are needed.
+               Returning 1 was incorrectly signalling a complete packet. */
 }
 
 /* --- Advanced Packing with Nonce Management --- */
@@ -1223,8 +1236,22 @@ int uavlink_pack_with_nonce(uint8_t *buf, const ul_header_t *h, const uint8_t *p
 /* Default encryption policy lookup.
    Replaces the previous 4KB static array (1024 entries, 7 used) with a
    switch-case to save ~4KB of BSS on embedded targets. */
+
+/* BUG-08 FIX: Override table — must be declared before ul_get_encrypt_policy uses it. */
+#define UL_ENCRYPT_OVERRIDE_MAX 8
+typedef struct { uint16_t msg_id; ul_encrypt_policy_t policy; } ul_encrypt_override_t;
+static ul_encrypt_override_t g_encrypt_overrides[UL_ENCRYPT_OVERRIDE_MAX];
+static int g_encrypt_override_count = 0;
+
 ul_encrypt_policy_t ul_get_encrypt_policy(uint16_t msg_id)
 {
+    /* BUG-08 FIX: Check runtime overrides first before falling through to defaults. */
+    for (int i = 0; i < g_encrypt_override_count; i++)
+    {
+        if (g_encrypt_overrides[i].msg_id == msg_id)
+            return g_encrypt_overrides[i].policy;
+    }
+
     switch (msg_id)
     {
     case UL_MSG_HEARTBEAT:
@@ -1256,12 +1283,25 @@ ul_encrypt_policy_t ul_get_encrypt_policy(uint16_t msg_id)
     }
 }
 
+/* ul_set_encrypt_policy: implemented immediately after the table it uses. */
 void ul_set_encrypt_policy(uint16_t msg_id, ul_encrypt_policy_t policy)
 {
-    /* Runtime override is not supported with the switch-based table.
-       Extend this function with a small override array if needed. */
-    (void)msg_id;
-    (void)policy;
+    /* Update existing override if present */
+    for (int i = 0; i < g_encrypt_override_count; i++)
+    {
+        if (g_encrypt_overrides[i].msg_id == msg_id)
+        {
+            g_encrypt_overrides[i].policy = policy;
+            return;
+        }
+    }
+    /* Add new override if space available */
+    if (g_encrypt_override_count < UL_ENCRYPT_OVERRIDE_MAX)
+    {
+        g_encrypt_overrides[g_encrypt_override_count].msg_id  = msg_id;
+        g_encrypt_overrides[g_encrypt_override_count].policy  = policy;
+        g_encrypt_override_count++;
+    }
 }
 
 /* OPTIMIZATION: Pack with selective encryption based on message policy
@@ -1472,4 +1512,61 @@ int ul_deserialize_batch(const uint8_t *payload, uint16_t payload_len,
 
     batch_out->num_messages = num_messages;
     return 0;
+}
+
+/* =============================================================================
+ * BUG-09 FIX: ul_reassembly_add_timed — evicts stale slots before adding.
+ * Pass now_ms from your platform clock (GetTickCount / clock_gettime etc.).
+ * ============================================================================= */
+int ul_reassembly_add_timed(ul_reassembly_ctx_t *ctx, const ul_header_t *hdr,
+                             const uint8_t *payload, uint16_t payload_len,
+                             uint8_t *output, uint16_t *output_len,
+                             uint32_t now_ms)
+{
+    if (!ctx || !hdr || !payload || !output || !output_len)
+        return -1;
+
+    /* Evict any slot that has exceeded UL_FRAG_TIMEOUT_MS */
+    for (int i = 0; i < 4; i++)
+    {
+        if (ctx->slots[i].active &&
+            (now_ms - ctx->slots[i].start_time_ms) > UL_FRAG_TIMEOUT_MS)
+        {
+            ctx->slots[i].active = false; /* Evict timed-out incomplete reassembly */
+        }
+    }
+
+    /* Record start_time_ms when we open a new slot */
+    /* Find an existing slot for this (msg_id, sys_id) */
+    int slot_idx = -1;
+    for (int i = 0; i < 4; i++)
+    {
+        if (ctx->slots[i].active &&
+            ctx->slots[i].msg_id == hdr->msg_id &&
+            ctx->slots[i].sys_id == hdr->sys_id)
+        {
+            slot_idx = i;
+            break;
+        }
+    }
+    if (slot_idx == -1)
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            if (!ctx->slots[i].active)
+            {
+                slot_idx = i;
+                break;
+            }
+        }
+    }
+    if (slot_idx == -1)
+        return -1; /* No slots available */
+
+    /* Stamp time on a freshly opened slot */
+    if (!ctx->slots[slot_idx].active)
+        ctx->slots[slot_idx].start_time_ms = now_ms;
+
+    /* Delegate to the core logic */
+    return ul_reassembly_add(ctx, hdr, payload, payload_len, output, output_len);
 }

@@ -76,14 +76,18 @@ int ul_load_key_from_hex_file(const char *filename, uint8_t key_out[32]);
 int ul_load_key_from_env(const char *var_name, uint8_t key_out[32], int format);
 
 /**
- * Generate random key (for testing/development only)
+ * Generate random key using the platform CSPRNG.
  *
  * @param key_out Output buffer for key (must be 32 bytes)
+ * @return 0 on success, -1 on failure.
+ *
+ * BUG-10 FIX: Previously returned void, silently leaving key_out zeroed on
+ * failure. Now returns -1 so callers can detect and abort on entropy failure.
  *
  * WARNING: Not suitable for production use. Use keygen.py to generate
  * cryptographically secure keys from proper entropy sources.
  */
-void ul_generate_random_key(uint8_t key_out[32]);
+int ul_generate_random_key(uint8_t key_out[32]);
 
 /**
  * Securely zero key buffer in memory
