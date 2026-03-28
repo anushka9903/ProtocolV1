@@ -15,8 +15,17 @@
 
 void ul_parser_zerocopy_init(ul_parser_zerocopy_t *parser)
 {
-    memset(parser, 0, sizeof(ul_parser_zerocopy_t));
-    parser->state = 0; // Start at SYNC1 state
+    /* Only reset ephemeral parsing state. Preserve key_32b, rx_count, replay_init, etc. */
+    parser->state = 0;
+    parser->payload_len = 0;
+    parser->bytes_received = 0;
+    parser->msg_id = 0;
+    parser->stream_type = 0;
+    parser->fragmented = false;
+    parser->output_payload = NULL;
+    parser->last_payload = NULL;
+    parser->crc_in = 0;
+    parser->crc_calc = 0;
 }
 
 uint8_t ul_get_link_quality(const ul_parser_zerocopy_t *p)

@@ -167,8 +167,26 @@ void ul_chacha20_poly1305_encrypt_neon(const uint8_t key[32], const uint8_t nonc
     // Compute MAC using monocypher's Poly1305
     crypto_poly1305_ctx ctx;
     crypto_poly1305_init(&ctx, poly_key);
+
+    // 1. AAD
     crypto_poly1305_update(&ctx, ad, ad_len);
+    // 2. Pad AAD to 16 bytes
+    uint8_t zero_pad[16] = {0};
+    crypto_poly1305_update(&ctx, zero_pad, (16 - (ad_len % 16)) % 16);
+
+    // 3. Ciphertext
     crypto_poly1305_update(&ctx, ciphertext, plaintext_len);
+    // 4. Pad Ciphertext to 16 bytes
+    crypto_poly1305_update(&ctx, zero_pad, (16 - (plaintext_len % 16)) % 16);
+
+    // 5. Append lengths (little-endian representation)
+    uint8_t sizes[16] = {0};
+    for (int i = 0; i < 8; i++) {
+        sizes[i]     = (uint8_t)(ad_len >> (i * 8));
+        sizes[i + 8] = (uint8_t)(plaintext_len >> (i * 8));
+    }
+    crypto_poly1305_update(&ctx, sizes, 16);
+
     crypto_poly1305_final(&ctx, mac);
 }
 
@@ -184,8 +202,25 @@ int ul_chacha20_poly1305_decrypt_neon(const uint8_t key[32], const uint8_t nonce
 
     crypto_poly1305_ctx ctx;
     crypto_poly1305_init(&ctx, poly_key);
+
+    // 1. AAD
     crypto_poly1305_update(&ctx, ad, ad_len);
+    // 2. Pad AAD to 16 bytes
+    uint8_t zero_pad[16] = {0};
+    crypto_poly1305_update(&ctx, zero_pad, (16 - (ad_len % 16)) % 16);
+
+    // 3. Ciphertext
     crypto_poly1305_update(&ctx, ciphertext, ciphertext_len);
+    // 4. Pad Ciphertext to 16 bytes
+    crypto_poly1305_update(&ctx, zero_pad, (16 - (ciphertext_len % 16)) % 16);
+
+    // 5. Append lengths (little-endian representation)
+    uint8_t sizes[16] = {0};
+    for (int i = 0; i < 8; i++) {
+        sizes[i]     = (uint8_t)(ad_len >> (i * 8));
+        sizes[i + 8] = (uint8_t)(ciphertext_len >> (i * 8));
+    }
+    crypto_poly1305_update(&ctx, sizes, 16);
 
     uint8_t computed_mac[16];
     crypto_poly1305_final(&ctx, computed_mac);
@@ -453,7 +488,7 @@ void ul_chacha20_auto(const uint8_t key[32], const uint8_t nonce[8],
     ul_chacha20_sse2(key, nonce, input, output, len, 1);
 #else
     // No hardware acceleration available
-    crypto_chacha20_djb(output, input, len, key, nonce, 0);
+    crypto_chacha20_djb(output, input, len, key, nonce, 1);
 #endif
 }
 

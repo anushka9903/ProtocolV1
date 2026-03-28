@@ -443,7 +443,9 @@ int main(int argc, char *argv[])
 
     // Zero-copy parser for incoming commands
     ul_parser_zerocopy_t cmd_parser;
+    memset(&cmd_parser, 0, sizeof(cmd_parser));
     ul_parser_zerocopy_init(&cmd_parser);
+    cmd_parser.key_32b = session_key; // Provide session key for transparent decryption
 
     uint32_t packets_sent = 0;
     uint32_t commands_received = 0;
@@ -508,69 +510,6 @@ int main(int argc, char *argv[])
                         hdr.frag_index = cmd_parser.header_buf[frag_offset];
                         hdr.frag_total = cmd_parser.header_buf[frag_offset + 1];
                         hdr.sys_id = cmd_parser.header_buf[5] & 0x3F;
-                    }
-
-                    // Handle decryption for encrypted commands
-                    if (hdr.encrypted && cmd_parser.payload_len > 0)
-                    {
-                        uint8_t nonce24[24] = {0};
-                        memcpy(nonce24, cmd_parser.cipher_nonce, 8);
-
-                        // Determine header length for AAD (includes entire header from SOF)
-                        uint8_t stream_type = ((cmd_parser.header_buf[1] & 0x3) << 2) |
-                                              ((cmd_parser.header_buf[2] >> 6) & 0x3);
-                        bool is_cmd = (stream_type == UL_STREAM_CMD || stream_type == UL_STREAM_CMD_ACK);
-                        size_t header_len = 4 + (is_cmd ? 5 : 4) + (cmd_parser.header_buf[3] & UL_FLAG_ENCRYPTED ? 8 : 0);
-
-                        // Need monocypher for decryption
-                        extern int crypto_aead_unlock(
-                            uint8_t *plain_text,
-                            const uint8_t mac[16],
-                            const uint8_t key[32],
-                            const uint8_t nonce[24],
-                            const uint8_t *ad, size_t ad_size,
-                            const uint8_t *cipher_text, size_t text_size);
-
-                        /* BUG-01 FIX: Use a SEPARATE plaintext buffer.
-                           The original code passed parse_buf as both the ciphertext input and
-                           plaintext output (aliased buffers). Monocypher does not support aliased
-                           in/out buffers for crypto_aead_unlock; verifying the MAC after
-                           partially overwriting the ciphertext produces an invalid result,
-                           effectively bypassing authentication for all encrypted commands. */
-                        uint8_t decrypted_buf[256]; /* Separate output — same max size as parse_buf */
-                        int auth_result = crypto_aead_unlock(
-                            decrypted_buf,           /* OUTPUT: plaintext (separate buffer) */
-                            cmd_parser.cipher_tag,
-                            session_key, nonce24,
-                            cmd_parser.header_buf, header_len,
-                            parse_buf,               /* INPUT:  ciphertext (original, untouched) */
-                            cmd_parser.payload_len);
-
-                        if (auth_result != 0)
-                        {
-                            printf("[CMD] Authentication failed! Ignoring.\n");
-                            ul_mempool_free(&pool, parse_buf);
-                            goto next_iter;
-                        }
-                        /* Only copy plaintext into parse_buf after MAC is fully verified */
-                        memcpy(parse_buf, decrypted_buf, cmd_parser.payload_len);
-                    }
-
-                    /* BUG-07 FIX: Extract the 12-bit sequence number from the correct
-                       extended-header bytes. header_buf[1] is the second byte of the base
-                       header and holds payload_len[11:8] | priority | stream_type[3:2] —
-                       NOT the sequence number. The sequence is:
-                         bits [11:10] from header_buf[3] (bits 1:0)
-                         bits [9:0]   from header_buf[4..5] upper 10 bits of seq_sys field */
-                    uint16_t seq_sys = ((uint16_t)cmd_parser.header_buf[4] << 8)
-                                     | (uint16_t)cmd_parser.header_buf[5];
-                    uint16_t received_seq = ((uint16_t)(cmd_parser.header_buf[3] & 0x3) << 10)
-                                          | ((seq_sys >> 6) & 0x3FF);
-                    if (ul_check_replay_window(&cmd_parser, received_seq) != 0)
-                    {
-                        printf("[SECURITY] Replay attack detected (seq=%u). Dropping.\n", received_seq);
-                        ul_mempool_free(&pool, parse_buf);
-                        goto next_iter;
                     }
 
                     printf("[CMD #%u] ", commands_received);

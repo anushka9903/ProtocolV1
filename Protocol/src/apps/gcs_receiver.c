@@ -600,7 +600,9 @@ int main(int argc, char *argv[])
 
     // Parser
     ul_parser_zerocopy_t parser;
+    memset(&parser, 0, sizeof(parser));
     ul_parser_zerocopy_init(&parser);
+    parser.key_32b = session_key; // Provide session key for transparent decryption
 
     uint32_t packets_received = 0;
     uint32_t parse_errors = 0;
@@ -855,30 +857,6 @@ int main(int argc, char *argv[])
                 uint16_t msg_id = parser.msg_id;
                 uint16_t payload_len = parser.payload_len;
                 bool encrypted = (parser.header_buf[3] & UL_FLAG_ENCRYPTED) != 0;
-
-                // Handle decryption
-                if (encrypted && payload_len > 0)
-                {
-                    uint8_t nonce24[24] = {0};
-                    memcpy(nonce24, parser.cipher_nonce, 8);
-
-                    uint8_t stream_type = ((parser.header_buf[1] & 0x3) << 2) |
-                                          ((parser.header_buf[2] >> 6) & 0x3);
-                    bool is_cmd = (stream_type == UL_STREAM_CMD || stream_type == UL_STREAM_CMD_ACK);
-                    // AAD includes entire header from SOF byte
-                    size_t header_len = 4 + (is_cmd ? 5 : 4) + (parser.header_buf[3] & UL_FLAG_ENCRYPTED ? 8 : 0);
-
-                    int auth_result = crypto_aead_unlock(
-                        parse_output, parser.cipher_tag, session_key, nonce24,
-                        parser.header_buf, header_len,
-                        parse_output, payload_len);
-
-                    if (auth_result != 0)
-                    {
-                        parse_errors++;
-                        continue;
-                    }
-                }
 
                 // Process message
                 switch (msg_id)
