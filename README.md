@@ -2,7 +2,7 @@
 
 Kestrel is a high-performance binary communication protocol purpose-built for UAV systems. It minimizes packet overhead and maximizes reliability on lossy radio links with built-in encryption, message routing, and integrity checking. The reference implementation in this repository is provided under the historical `kestrel.*` filenames. Features comprehensive optimizations including zero-copy parsing, hardware-accelerated encryption, and advanced compression.
 
-**Current Version:** 1.0 (March 2026)
+**Current Version:** 1.2.8 (March 2026)
 
 ### ✨ Key Achievements
 
