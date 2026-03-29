@@ -16,8 +16,17 @@ import signal
 # ---- Configuration ----
 DURATION_SECONDS = 60        # 1 minute
 BIN_DIR = os.path.join(os.path.dirname(__file__), "bin")
-UAV_EXE = os.path.join(BIN_DIR, "uav_simulator.exe")
-GCS_EXE = os.path.join(BIN_DIR, "gcs_receiver.exe")
+EXT = ".exe" if os.name == "nt" else ""
+UAV_EXE = os.path.join(BIN_DIR, f"uav_simulator{EXT}")
+GCS_EXE = os.path.join(BIN_DIR, f"gcs_receiver{EXT}")
+
+# Cross-platform subprocess flags
+if os.name == "nt":
+    C_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP
+    TERM_SIG = signal.CTRL_BREAK_EVENT
+else:
+    C_FLAGS = 0
+    TERM_SIG = signal.SIGTERM
 
 # ---- Shared State ----
 uav_lines   = []
@@ -111,7 +120,7 @@ def main():
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
         cwd=os.path.dirname(UAV_EXE),
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        creationflags=C_FLAGS,
     )
 
     time.sleep(1.5)  # Give UAV time to open its socket first
@@ -122,7 +131,7 @@ def main():
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
         cwd=os.path.dirname(GCS_EXE),
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        creationflags=C_FLAGS,
     )
 
     # Start reader threads
@@ -139,7 +148,7 @@ def main():
     print("\n  [+] Test duration reached. Terminating processes...")
     for proc in (uav_proc, gcs_proc):
         try:
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
+            proc.send_signal(TERM_SIG)
         except Exception:
             pass
         try:
